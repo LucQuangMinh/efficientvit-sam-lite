@@ -1,0 +1,4 @@
+efficientvit_sam_l0.pt
+__pycache__/
+*.pyc
+.DS_Store

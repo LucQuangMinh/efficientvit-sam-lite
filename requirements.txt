@@ -1,0 +1,6 @@
+torch
+torchvision
+numpy
+opencv-python
+gradio
+git+https://github.com/facebookresearch/segment-anything.git
