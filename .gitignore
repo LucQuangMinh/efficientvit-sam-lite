@@ -1,4 +1,7 @@
-efficientvit_sam_l0.pt
+*.pt
 __pycache__/
 *.pyc
 .DS_Store
+assets/checkpoints/
+output_*.mp4
+*.mp4

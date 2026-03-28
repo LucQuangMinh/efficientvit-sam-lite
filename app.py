@@ -1,144 +1,121 @@
+import argparse
+import math
 import os
+import sys
+import time
 import cv2
-import torch
 import numpy as np
+import torch
 import gradio as gr
+from PIL import Image
+from torchvision import transforms
 
-# Thư viện mạng EfficientViT lõi vừa được rút gọn
-from efficientvit.sam_model_zoo import create_efficientvit_sam_model
-from efficientvit.models.efficientvit.sam import EfficientViTSamPredictor
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(BASE_DIR)
 
-# ==========================================
-# 1. CẤU HÌNH MÔ HÌNH (CONFIGURATION)
-# ==========================================
-# Khuyến khích dùng model l0_pt gọn nhẹ (có thể đổi sang xl1 để tăng mốc chính xác)
-MODEL_NAME = "efficientvit-sam-l0"
-WEIGHTS_PATH = "./efficientvit_sam_l0.pt"
+from efficientvit.models.utils import resize
+from efficientvit.seg_model_zoo import create_efficientvit_seg_model
+from applications.efficientvit_seg.eval_efficientvit_seg_model import CityscapesDataset, Resize, ToTensor, get_canvas
 
-print("[INFO] Đang khởi tạo hệ thống AI...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"[INFO] Chế độ phần cứng: {device.upper()}")
+print("Đang khởi động Hạt Nhân AI (EfficientViT-Seg-L2)...")
+# Khởi tạo toàn cục để tránh load model nhiều lần
+model = create_efficientvit_seg_model("efficientvit-seg-l2-cityscapes").cuda()
+model.eval()
 
-# Khởi tạo Predictor toàn cục (Global Predictor)
-predictor = None
+transform = transforms.Compose([
+    Resize((1024, 2048)), # Cityscapes default
+    ToTensor(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+class_colors = CityscapesDataset.class_colors
 
-# Kiểm tra người dùng đã tải weights chưa để ra cảnh báo hợp lý thay vì crash
-if not os.path.exists(WEIGHTS_PATH):
-    print(f"\n[⚠️ CẢNH BÁO] Không tìm thấy file hệ trọng số tại đường dẫn: {WEIGHTS_PATH}")
-    print("Vui lòng đọc kỹ hướng dẫn file README.md để tải mô hình trước khi Test ứng dụng trên nền Web.\n")
-else:
-    print("[INFO] Đang nạp Mạng Nơ-ron EfficientViT-SAM vào VRAM/RAM...")
-    
-    # Nạp kiến trúc mạng và gán file trọng số (Weights)
-    model = create_efficientvit_sam_model(name=MODEL_NAME, weight_url=WEIGHTS_PATH)
-    model = model.to(device).eval()
-    
-    # Bọc kiến trúc qua class Predictor chuyên dụng của bộ SAM
-    predictor = EfficientViTSamPredictor(model)
-    print("[INFO] Khởi tạo AI hoàn tất. Hệ thống sẵn sàng phục vụ!")
-
-
-# ==========================================
-# 2. HÀM XỬ LÝ LÕI TÁCH NỀN (CORE INFERENCE)
-# ==========================================
-def process_click(image: np.ndarray, evt: gr.SelectData) -> np.ndarray:
-    """
-    Xử lý sự kiện Interactive khi người dùng click chuột lên hình ảnh giao diện.
-    Hàm sẽ hứng toạ độ Point (X, Y) do User click và gọi Predictor đưa ra Mask.
-    """
-    if predictor is None:
-        raise gr.Error("Chưa load được weights mô hình. Hãy tải file .pt theo hướng dẫn trong README.md nhé!")
-
-    if image is None:
+def process_image(img):
+    if img is None:
         return None
-
-    # Lấy toạ độ X, Y do mũi tên chuột truyền từ Web Frontend Gradio xuống Backend
-    click_x, click_y = evt.index
-
-    # -> Bước 1: Trích xuất đặc trưng của bức hình (Image Embedding)
-    predictor.set_image(image)
-
-    # -> Bước 2: Chuẩn bị tín hiệu Prompts (Điểm Chỉ Định)
-    # Nhãn số 1 (Label = 1) ám chỉ điểm click này là Điểm Nền Vật Thể (Foreground)
-    point_coords = np.array([[click_x, click_y]])
-    point_labels = np.array([1])
-
-    # -> Bước 3: Đưa Point vào AI để phân giải, nhận về các viền bao (Masks)
-    masks, iou_predictions, _ = predictor.predict(
-        point_coords=point_coords,
-        point_labels=point_labels,
-        multimask_output=True, # Trả về 3 lớp kết quả (bao quát - trung bình - chật hẹp) để chọn
-    )
-
-    # -> Bước 4: AI tự lọc ra Mask có độ tin cậy tự động (IoU - Intersection over Union) cao nhất
-    best_mask_idx = np.argmax(iou_predictions)
-    best_mask = masks[best_mask_idx]
-
-    # -> Bước 5: Phủ màu lớp màng (Mask) lên không gian ảnh gốc để Review
-    # Tạo màu Translucency: Lớp phủ hệ màu Đỏ (RGB: 255, 50, 50) vào các Pixel được đánh dấu bằng True
-    color_mask = np.array([255, 50, 50])
-    overlay_image = image.copy()
+    image = np.array(img.convert("RGB"))
     
-    # Pha trộn màu theo công thức Translucency (Độ trong suốt 50%)
-    overlay_image[best_mask] = overlay_image[best_mask] * 0.5 + color_mask * 0.5
-
-    # Phóng lại 1 dấu chấm nhỏ Màu Xanh Lá đánh dấu vị trí người dùng đã từng Click
-    cv2.circle(overlay_image, (click_x, click_y), radius=6, color=(0, 255, 0), thickness=-1)
-    
-    # Trả về kết quả đầu ra
-    return overlay_image
-
-
-# ==========================================
-# 3. THIẾT KẾ GIAO DIỆN WEB (GRADIO UI)
-# ==========================================
-custom_theme = gr.themes.Soft(
-    primary_hue="blue",
-    secondary_hue="gray",
-).set(button_primary_background_fill="*primary_500")
-
-with gr.Blocks(theme=custom_theme, title="EfficientViT SAM 2.0 Web") as demo:
-    
-    # Header hiển thị chuẩn mực
-    gr.Markdown(
-        """
-        <div style="text-align: center;">
-            <h1>🚀 Mô Hình EfficientViT-SAM 2.0 (Interactive Edition)</h1>
-            <p><strong>Công Cụ Tách Nền Point-Prompt</strong> • Hoạt động siêu tốc bằng sức mạnh cục bộ của MIT-Core AI</p>
-        </div>
-        """
-    )
-    
-    # Body phân chia các bước tương tác rõ ràng
-    gr.Markdown(
-        """
-        ### 📖 Cách trải nghiệm ngay:
-        1. **Thả File:** Kéo bức ảnh bất kì trong máy túy của bạn (JPG, PNG) vào khu vực Ô Tải Ảnh bên trái.
-        2. **Tương tác Phép Màu:** Xin hãy dùng chuột trỏ và **nhấp Trái (Click)** thật chuẩn xác vào 1 điểm trên khuôn mặt vật thể / xe hơi / động vật. Mạng Nơ-ron sẽ đọc luồng toạ độ (X, Y) và phóng tia bao phủ trọn vẹn sự vật đó dưới 1 giây.
-        """
-    )
-    
-    with gr.Row():
-        with gr.Column():
-            input_image = gr.Image(label="📸 ẢNH ĐẦU VÀO (Hãy Click trực tiếp lên ảnh này)", interactive=True)
+    with torch.inference_mode():
+        data = transform({"data": image, "label": np.ones_like(image)})["data"]
+        data = torch.unsqueeze(data, dim=0).cuda()
+        
+        output = model(data)
+        if output.shape[-2:] != image.shape[:2]:
+            output = resize(output, size=image.shape[:2])
             
-        with gr.Column():
-            output_image = gr.Image(label="✨ KẾT QUẢ AI PHÂN TÁCH (Phủ Đỏ Mask)", interactive=False)
+        output = torch.argmax(output, dim=1).cpu().numpy()[0]
+        canvas = get_canvas(image, output, class_colors)
+        
+    return canvas
+
+def process_video(video_path, progress=gr.Progress()):
+    if video_path is None:
+        return None
+    
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise gr.Error("Không thể đọc định dạng Video này!")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    output_path = os.path.join(BASE_DIR, "output_adas_video.mp4")
+    # Sử dụng H264 để chạy mượt ngay trên Trình duyệt Web của Gradio
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps if fps > 0 else 30.0, (width, height))
+
+    with torch.inference_mode():
+        for i in progress.tqdm(range(total_frames), desc="Đang phân tích từng Khung Hình (Frames)"):
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            data = transform({"data": image, "label": np.ones_like(image)})["data"]
+            data = torch.unsqueeze(data, dim=0).cuda()
             
-    # Kết nối sự kiện nhấp chuột (Select Event) từ ô Tải Ảnh đưa xuống Backend Python
-    input_image.select(fn=process_click, inputs=[input_image], outputs=[output_image])
+            output = model(data)
+            if output.shape[-2:] != image.shape[:2]:
+                output = resize(output, size=image.shape[:2])
+                
+            output = torch.argmax(output, dim=1).cpu().numpy()[0]
+            canvas = get_canvas(image, output, class_colors)
+            canvas_bgr = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+            
+            out.write(canvas_bgr)
+            
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+    
+    return output_path
 
-    # Footer giới thiệu uy tín
-    gr.Markdown(
-        """
-        ---
-        <div style="text-align: center; color: gray; font-size: 14px;">
-            Hệ thống nguyên bản được phát triển bởi <a href='https://github.com/mit-han-lab/efficientvit' target='_blank'>MIT-Han-Lab</a>. 
-            <i>Dự án đã được rút gọn 100% tài nguyên dư thừa, thiết kế cấu trúc gọn nhẹ thích ứng hoàn hảo cho việc Test trực quan Local.</i>
-        </div>
-        """
-    )
+# ================================
+# THIẾT KẾ GIAO DIỆN WEB CỰC ĐẸP
+# ================================
+CSS = """
+    .container { max-width: 1200px; margin: auto; }
+    h1 { text-align: center; color: #1e3a8a; font-family: 'Space Grotesk', sans-serif; }
+"""
 
-# Lệnh khởi chạy server (Localhost)
+with gr.Blocks(title="ADAS Vision by EfficientViT", css=CSS, theme=gr.themes.Soft(primary_hue="indigo")) as demo:
+    gr.Markdown("# 🚗 Hệ Thống Trí Tuệ Nhân Tạo Tự Lái (ADAS Vision)")
+    gr.Markdown("*Tự động nhận diện Phương tiện, Người đi bộ, Biển báo chỉ bằng Camera thường. Tự hào sức mạnh lõi phân tách ngữ nghĩa (Cityscapes) từ Viện hàn lâm MIT.*")
+    
+    with gr.Tabs():
+        with gr.Tab("🖼️ Chế độ Ảnh (Image)"):
+            with gr.Row():
+                img_in = gr.Image(type="pil", label="Bức ảnh đường phố (Đầu Vào)")
+                img_out = gr.Image(label="Hệ thống quét Radar (Đầu Ra)")
+            img_btn = gr.Button("🔍 Phân Tích Khung Cảnh", variant="primary")
+            img_btn.click(fn=process_image, inputs=[img_in], outputs=[img_out])
+            
+        with gr.Tab("🎞️ Chế độ Video (Dashcam)"):
+            with gr.Row():
+                vid_in = gr.Video(label="File Video quay đường phố (Chuẩn .mp4)")
+                vid_out = gr.Video(label="Video Màn Hình Trực Quan Đầu Ra")
+            vid_btn = gr.Button("🚀 Kích Hoạt Hệ Thống Quét Chuyển Động", variant="primary")
+            vid_btn.click(fn=process_video, inputs=[vid_in], outputs=[vid_out])
+
 if __name__ == "__main__":
     demo.launch(inbrowser=True)

@@ -1,2 +1,2 @@
 from .backbone import *
-from .sam import *
+from .seg import *

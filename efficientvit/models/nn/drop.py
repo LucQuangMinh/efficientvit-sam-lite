@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from efficientvit.apps.trainer.run_config import Scheduler
 from efficientvit.models.nn.ops import IdentityLayer, ResidualBlock
 from efficientvit.models.utils import build_kwargs_from_config
 
@@ -72,7 +73,7 @@ class DropPathResidualBlock(ResidualBlock):
         else:
             drop_prob = self.drop_prob
             if self.scheduled:
-                drop_prob *= 1.0 # Mocked Scheduler.PROGRESS for inference only apps
+                drop_prob *= np.clip(Scheduler.PROGRESS, 0, 1)
             keep_prob = 1 - drop_prob
 
             shape = (x.shape[0],) + (1,) * (x.ndim - 1)
